@@ -1,0 +1,526 @@
+---
+title: "DEG"
+author: "Dijith"
+date: "2026-02-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# ============================================
+# CHUNK 1: LOAD REQUIRED PACKAGES
+# ============================================
+# WHY: All the tools we need for DEG analysis
+# - zellkonverter/SingleCellExperiment: Read h5ad files
+# - Seurat/MAST: Differential expression testing
+# - clusterProfiler/ReactomePA: Pathway enrichment
+# - org.Hs.eg.db: Gene ID mapping (human)
+
+library(zellkonverter)
+library(SingleCellExperiment)
+library(Seurat)
+library(MAST)
+library(clusterProfiler)
+library(ReactomePA)
+library(tidyverse)
+library(org.Hs.eg.db)
+library(dplyr)
+library(ggplot2)
+library(enrichplot)
+
+cat("✓ Packages loaded\n")
+```
+
+
+
+```{r}
+# ============================================
+# CHUNK 2: LOAD CELLTYPIST-ANNOTATED H5AD
+# ============================================
+# WHY: Convert Python AnnData (h5ad) to R Seurat object
+# WHAT: Reads the file you saved from CellTypist in Colab
+
+# Set paths
+h5ad_path <- "~/GSE279086/output/GSE279086_celltypist.h5ad" 
+output_dir <- "~/GSE279086/output/"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Read h5ad file
+cat("Reading h5ad file...\n")
+sce <- readH5AD(h5ad_path)
+# Warnings about obsm/obsp are NORMAL - ignore them!
+
+# Convert to Seurat
+cat("Converting to Seurat object...\n")
+seurat_obj <- as.Seurat(
+  sce,
+  counts = "counts",      # Raw counts
+  data = "logcounts"      # Normalized data
+)
+
+# Save for future use
+saveRDS(seurat_obj, file.path(output_dir, "GSE279086_with_celltypist.rds"))
+cat("✓ Saved Seurat object\n")
+```
+
+
+```{r}
+# ============================================
+# CHUNK 3: CLEAN CELL TYPE NAMES & CHECK DISTRIBUTION
+# ============================================
+# WHY: 
+# 1. CellTypist adds condition suffixes (_T1D, _HC) - we need to remove them
+# 2. Check how many cells per cell type per condition
+# 3. Ensure we have enough cells for DEG analysis
+
+# Load if starting fresh
+seurat_obj <- readRDS("~/GSE279086/output/GSE279086_with_celltypist.rds")
+
+# Check metadata
+cat("\n=== METADATA COLUMNS ===\n")
+print(colnames(seurat_obj@meta.data))
+
+# Check original cell type names (may have _T1D/_HC suffixes)
+cat("\n=== ORIGINAL CELL TYPE DISTRIBUTION ===\n")
+print(table(seurat_obj$Condition, seurat_obj$majority_voting))
+
+# Remove condition suffixes from cell type names
+# Paper only has T1D/HC, so remove "_T1D" and "_HC"
+seurat_obj$majority_voting <- gsub("_(T1D|HC)$", "", seurat_obj$majority_voting)
+
+# Verify cleaning worked
+cat("\n=== CLEANED CELL TYPE DISTRIBUTION ===\n")
+print(table(seurat_obj$Condition, seurat_obj$majority_voting))
+
+# Check total cells per condition
+cat("\n=== CELLS PER CONDITION ===\n")
+print(table(seurat_obj$Condition))
+
+# Set default assay (this is what Seurat calls it)
+DefaultAssay(seurat_obj) <- "originalexp"
+```
+
+```{r}
+# ============================================
+# CHUNK 4: GET ALL CELL TYPES FOR ANALYSIS
+# ============================================
+# WHY: Create list of cell types to run DEG on
+
+# Get unique cell types
+celltypes <- sort(unique(seurat_obj$majority_voting))
+cat("\n=== CELL TYPES FOUND ===\n")
+print(celltypes)
+
+# Clean cell type names for filenames (remove special chars)
+celltypes_clean <- gsub("[^a-zA-Z0-9]", "_", celltypes)
+names(celltypes_clean) <- celltypes
+
+cat("\n=== CLEANED FILENAMES ===\n")
+print(celltypes_clean)
+```
+
+
+
+```{r}
+# ============================================
+# CHUNK 5: DIFFERENTIAL EXPRESSION - T1D vs HC
+# ============================================
+# WHY: Find genes that change between T1D and HC in each cell type
+# WHAT: Uses MAST (recommended for scRNA-seq)
+#       Accounts for nCount_RNA and percent.mt as covariates
+
+run_mast_per_celltype <- function(
+  seu,
+  celltype_col = "majority_voting",
+  condition_col = "Condition",
+  outdir = "~/GSE279086/output/DEG_MAST_T1D_vs_HC",
+  min_cells_per_group = 20
+) {
+  
+  dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+  
+  meta <- seu@meta.data
+  celltypes <- sort(unique(meta[[celltype_col]]))
+  
+  results_summary <- data.frame()
+  
+  for (ct in celltypes) {
+    
+    cat("\n▶ Processing:", ct, "\n")
+    
+    # Subset cells for this cell type
+    cells_ct <- rownames(meta)[meta[[celltype_col]] == ct]
+    cond_tab <- table(meta[cells_ct, condition_col])
+    
+    # Check both T1D and HC exist
+    if (!all(c("T1D", "HC") %in% names(cond_tab))) {
+      cat("  ❌ Missing T1D or HC → skipping\n")
+      next
+    }
+    
+    # Check minimum cells
+    if (any(cond_tab[c("T1D", "HC")] < min_cells_per_group)) {
+      cat("  ❌ Insufficient cells (T1D:", cond_tab["T1D"], 
+          "HC:", cond_tab["HC"], ") → skipping\n")
+      next
+    }
+    
+    cat("  ✓ Cells - T1D:", cond_tab["T1D"], "HC:", cond_tab["HC"], "\n")
+    
+    # Subset Seurat object
+    seu_ct <- subset(seu, cells = cells_ct)
+    DefaultAssay(seu_ct) <- "originalexp"
+    seu_ct <- NormalizeData(seu_ct, verbose = FALSE)
+    
+    Idents(seu_ct) <- condition_col
+    
+    # Run MAST differential expression
+    cat("  Running MAST...\n")
+    deg <- FindMarkers(
+      seu_ct,
+      ident.1 = "T1D",           # Experimental group
+      ident.2 = "HC",            # Reference group
+      test.use = "MAST",
+      logfc.threshold = 0,       # Don't filter - we'll do it later
+      min.pct = 0.1,            # Gene expressed in at least 10% of cells
+      latent.vars = c("nCount_RNA", "percent.mt")  # Technical covariates
+    )
+    
+    deg$gene <- rownames(deg)
+    deg <- deg[, c("gene", setdiff(colnames(deg), "gene"))]
+    
+    # Clean filename
+    ct_clean <- gsub("[^a-zA-Z0-9]", "_", ct)
+    
+    # Save all DEGs
+    out_file <- file.path(outdir, paste0("DEG_", ct_clean, "_T1D_vs_HC.csv"))
+    write.csv(deg, out_file, row.names = FALSE)
+    cat("  ✓ Saved:", basename(out_file), "\n")
+    
+    # Count significant DEGs (p_adj < 0.05, |log2FC| > 0.25)
+    sig_up <- sum(deg$avg_log2FC > 0.25 & deg$p_val_adj < 0.05)
+    sig_down <- sum(deg$avg_log2FC < -0.25 & deg$p_val_adj < 0.05)
+    
+    results_summary <- rbind(results_summary, data.frame(
+      CellType = ct,
+      Cells_T1D = cond_tab["T1D"],
+      Cells_HC = cond_tab["HC"],
+      Total_DEGs = nrow(deg),
+      Upregulated = sig_up,
+      Downregulated = sig_down,
+      Significant = sig_up + sig_down
+    ))
+  }
+  
+  # Save summary
+  write.csv(results_summary, 
+            file.path(outdir, "DEG_summary_all_celltypes.csv"), 
+            row.names = FALSE)
+  
+  cat("\n✓ DEG analysis complete!\n")
+  return(results_summary)
+}
+
+# RUN THE FUNCTION
+deg_summary <- run_mast_per_celltype(
+  seu = seurat_obj,
+  celltype_col = "majority_voting",
+  condition_col = "Condition",
+  outdir = "~/GSE279086/output/DEG_MAST_T1D_vs_HC",
+  min_cells_per_group = 20
+)
+
+# Display summary
+print(deg_summary %>% arrange(desc(Significant)))
+```
+
+
+```{r}
+
+# ============================================
+# CHUNK 6: PATHWAY ENRICHMENT ANALYSIS
+# ============================================
+# WHY: Understand biological processes affected in T1D vs HC
+# WHAT: Reactome pathway GSEA using ranked gene lists
+
+deg_path <- "~/GSE279086/output/DEG_MAST_T1D_vs_HC/"
+
+# Get all DEG files
+deg_files <- list.files(
+  deg_path,
+  pattern = "^DEG_.*_T1D_vs_HC\\.csv$",
+  full.names = TRUE
+)
+
+cat("\n=== DEG FILES FOUND ===\n")
+print(basename(deg_files))
+
+# Initialize master dataframe
+all_pathways_df <- data.frame()
+
+for (file_path in deg_files) {
+  
+  file_name <- basename(file_path)
+  cat("\n▶ Processing:", file_name, "\n")
+  
+  # Extract cell type
+  celltype <- gsub("^DEG_(.*?)_T1D_vs_HC\\.csv$", "\\1", file_name)
+  if (celltype == file_name) {
+    cat("  ❌ Could not extract cell type\n")
+    next
+  }
+  cat("  ✓ Cell type:", celltype, "\n")
+  
+  # Read DEG file
+  res <- read.csv(file_path)
+  cat("  ✓ Genes:", nrow(res), "\n")
+  
+  # Map SYMBOL to ENTREZ ID
+  ncbi_map <- bitr(
+    res$gene,
+    fromType = "SYMBOL",
+    toType = "ENTREZID",
+    OrgDb = org.Hs.eg.db
+  )
+  cat("  ✓ Mapped to ENTREZ:", nrow(ncbi_map), "\n")
+  
+  # Merge and deduplicate
+  res_mapped <- res %>%
+    left_join(ncbi_map, by = c("gene" = "SYMBOL")) %>%
+    filter(!is.na(ENTREZID)) %>%
+    distinct(ENTREZID, .keep_all = TRUE)
+  
+  # Create ranked gene list (sorted by log2FC)
+  gene_list <- res_mapped$avg_log2FC
+  names(gene_list) <- res_mapped$ENTREZID
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  
+  # Skip if too few genes
+  if (length(gene_list) < 20) {
+    cat("  ⏭ Too few genes for GSEA\n")
+    next
+  }
+  
+  # Run Reactome GSEA
+  cat("  Running Reactome GSEA...\n")
+  gsea_res <- tryCatch({
+    gsePathway(
+      geneList = gene_list,
+      organism = "human",
+      pvalueCutoff = 0.2,        # Less strict for discovery
+      eps = 0,
+      verbose = FALSE
+    )
+  }, error = function(e) NULL)
+  
+  if (is.null(gsea_res) || nrow(gsea_res@result) == 0) {
+    cat("  ⏭ No significant pathways\n")
+    next
+  }
+  
+  # Make readable (ENTREZID → SYMBOL)
+  gsea_res <- setReadable(
+    gsea_res,
+    OrgDb = org.Hs.eg.db,
+    keyType = "ENTREZID"
+  )
+  
+  # Extract results
+  pathways <- gsea_res@result %>%
+    filter(p.adjust < 0.2) %>%
+    select(Description, NES, pvalue, p.adjust, setSize, core_enrichment)
+  
+  cat("  ✓ Significant pathways:", nrow(pathways), "\n")
+  
+  # Add metadata
+  pathways$CellType <- celltype
+  pathways$Condition <- "T1D_vs_HC"
+  
+  # Save per cell type
+  ct_clean <- gsub("[^a-zA-Z0-9]", "_", celltype)
+  out_csv <- file.path(deg_path, paste0(ct_clean, "_Reactome_GSEA.csv"))
+  write.csv(pathways, out_csv, row.names = FALSE)
+  
+  # Add to master
+  all_pathways_df <- rbind(all_pathways_df, pathways)
+}
+
+# Save master pathway file
+if(nrow(all_pathways_df) > 0) {
+  write.csv(all_pathways_df, 
+            file.path(deg_path, "ALL_CELLTYPES_Reactome_GSEA.csv"),
+            row.names = FALSE)
+  cat("\n✓ Master pathway file saved\n")
+}
+```
+
+```{r}
+# ============================================
+# FIXED PATHWAY ANALYSIS - MORE SENSITIVE
+# ============================================
+
+# Install msigdbr (Molecular Signatures Database in R)
+install.packages("msigdbr")
+
+# Also install fgsea if you haven't yet
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("fgsea")
+
+# Then load them
+library(fgsea)
+library(ReactomePA)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(msigdbr)  # Better pathway databases
+
+# Get Reactome pathways
+reactome_sets <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME")
+reactome_list <- split(reactome_sets$entrez_gene, reactome_sets$gs_name)
+
+# Alternative: GO Biological Processes (often more informative)
+go_sets <- msigdbr(species = "Homo sapiens", category = "C5", subcategory = "GO:BP")
+go_list <- split(go_sets$entrez_gene, go_sets$gs_name)
+
+deg_path <- "~/GSE279086/output/DEG_MAST_T1D_vs_HC/"
+deg_files <- list.files(deg_path, pattern = "^DEG_.*_T1D_vs_HC\\.csv$", full.names = TRUE)
+
+all_gsea_results <- data.frame()
+
+for (file_path in deg_files) {
+  
+  file_name <- basename(file_path)
+  celltype <- gsub("^DEG_(.*?)_T1D_vs_HC\\.csv$", "\\1", file_name)
+  cat("\n📊 Processing:", celltype, "\n")
+  
+  # Read DEGs
+  res <- read.csv(file_path)
+  
+  # Map to ENTREZ
+  ncbi_map <- bitr(res$gene, fromType = "SYMBOL", toType = "ENTREZID", 
+                   OrgDb = org.Hs.eg.db, drop = TRUE)
+  
+  res_mapped <- res %>%
+    inner_join(ncbi_map, by = c("gene" = "SYMBOL")) %>%
+    distinct(ENTREZID, .keep_all = TRUE)
+  
+  # METHOD 1: fGSEA using STATISTIC (not log2FC) - MORE POWERFUL!
+  # Use t-statistic or -log10(p-value) * sign(log2FC)
+  res_mapped$stat <- -log10(res_mapped$p_val) * sign(res_mapped$avg_log2FC)
+  
+  # Create ranked list
+  gene_stats <- res_mapped$stat
+  names(gene_stats) <- res_mapped$ENTREZID
+  gene_stats <- sort(gene_stats, decreasing = TRUE)
+  
+  # Run fGSEA
+  fgsea_res <- fgsea(
+    pathways = reactome_list,
+    stats = gene_stats,
+    minSize = 15,
+    maxSize = 500,
+    nperm = 10000
+  )
+  
+  # Filter significant
+  fgsea_sig <- fgsea_res[fgsea_res$padj < 0.25, ]
+  
+  cat("  Reactome pathways:", nrow(fgsea_sig), "\n")
+  
+  # Also check GO:BP
+  fgsea_go <- fgsea(
+    pathways = go_list,
+    stats = gene_stats,
+    minSize = 15,
+    maxSize = 500,
+    nperm = 10000
+  )
+  
+  go_sig <- fgsea_go[fgsea_go$padj < 0.25, ]
+  cat("  GO:BP pathways:", nrow(go_sig), "\n")
+  
+  # Format results
+  if(nrow(fgsea_sig) > 0) {
+    fgsea_sig$CellType <- celltype
+    fgsea_sig$Database <- "Reactome"
+    fgsea_sig$Condition <- "T1D_vs_HC"
+    all_gsea_results <- rbind(all_gsea_results, fgsea_sig)
+  }
+  
+  if(nrow(go_sig) > 0) {
+    go_sig$CellType <- celltype
+    go_sig$Database <- "GO:BP"
+    go_sig$Condition <- "T1D_vs_HC"
+    all_gsea_results <- rbind(all_gsea_results, go_sig)
+  }
+  
+  # Save per cell type
+  if(nrow(fgsea_sig) > 0 || nrow(go_sig) > 0) {
+    ct_clean <- gsub("[^a-zA-Z0-9]", "_", celltype)
+    saveRDS(list(Reactome = fgsea_sig, GO = go_sig), 
+            file.path(deg_path, paste0(ct_clean, "_fGSEA_results.rds")))
+  }
+}
+
+# Save all results
+saveRDS(all_gsea_results, file.path(deg_path, "ALL_CELLTYPES_fGSEA_results.rds"))
+
+```
+
+
+
+```{r}
+# ============================================
+# CHUNK 8: PLOT TOP PATHWAYS PER CELL TYPE
+# ============================================
+# WHY: Visualize which pathways are upregulated/downregulated
+
+if(exists("all_pathways_df") && nrow(all_pathways_df) > 0) {
+  
+  for (ct in unique(all_pathways_df$CellType)) {
+    
+    df_ct <- all_pathways_df %>%
+      filter(CellType == ct)
+    
+    if (nrow(df_ct) == 0) next
+    
+    # Top 10 pathways by |NES|
+    top_pathways <- df_ct %>%
+      arrange(desc(abs(NES))) %>%
+      head(10)
+    
+    # Order by NES
+    top_pathways$Description <- factor(
+      top_pathways$Description,
+      levels = top_pathways$Description[order(top_pathways$NES)]
+    )
+    
+    # Create dot plot
+    p <- ggplot(top_pathways, 
+                aes(x = NES, y = Description, 
+                    color = p.adjust, size = setSize)) +
+      geom_point() +
+      scale_color_gradient(low = "red", high = "blue") +
+      theme_minimal(base_size = 12) +
+      labs(
+        title = paste(ct, "- Reactome Pathways"),
+        x = "Normalized Enrichment Score (NES)",
+        y = "",
+        color = "Adj. p-value",
+        size = "Gene set size"
+      ) +
+      theme(
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(face = "bold", hjust = 0.5)
+      )
+    
+    # Save
+    ct_clean <- gsub("[^a-zA-Z0-9]", "_", ct)
+    png_file <- file.path(deg_path, paste0(ct_clean, "_pathways.png"))
+    ggsave(png_file, p, width = 10, height = 7, dpi = 300)
+    cat("✓ Saved pathway plot:", basename(png_file), "\n")
+  }
+}
+```
+
+
+

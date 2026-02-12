@@ -1,0 +1,310 @@
+---
+title: "GSE279086 Single-Cell Analysis - Part 3: Normalization & PCA"
+author: "Smriti Arora"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# SCRIPT 03: NORMALIZATION, SCALING, AND PCA
+
+```{r setup}
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+
+# Set directories
+outputDir <- "~/GSE279086/output/"
+plotDir <- "~/GSE279086/plots/"
+```
+
+## STEP 1: Load Filtered Data
+
+```{r load_filtered}
+seurat_filtered <- readRDS(file.path(outputDir, "seurat_filtered.rds"))
+
+cat("✓ Loaded filtered Seurat object\n")
+cat("Cells:", ncol(seurat_filtered), "\n")
+cat("Genes:", nrow(seurat_filtered), "\n")
+cat("Conditions:", paste(names(table(seurat_filtered$Condition)), collapse = ", "), "\n")
+```
+
+## STEP 2: Normalize Data
+
+```{r normalize}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("NORMALIZING DATA\n")
+cat(rep("=", 60), "\n", sep = "")
+
+seurat_norm <- NormalizeData(
+  seurat_filtered,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000,
+  verbose = FALSE
+)
+
+cat("✓ Normalization complete\n")
+cat("Method: LogNormalize\n")
+cat("Scale factor: 10,000\n")
+cat("Formula: log1p(count ÷ total_count × 10,000)\n")
+```
+
+## STEP 3: Find Variable Features
+
+```{r find_variable_features}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("FINDING VARIABLE FEATURES\n")
+cat(rep("=", 60), "\n", sep = "")
+
+seurat_norm <- FindVariableFeatures(
+  seurat_norm,
+  selection.method = "vst",
+  nfeatures = 2500,
+  verbose = FALSE
+)
+
+# Get top variable features
+top10_var <- head(VariableFeatures(seurat_norm), 10)
+cat("✓ Found 2500 variable features\n")
+cat("\nTop 10 most variable genes:\n")
+print(top10_var)
+
+# Plot variable features
+var_plot <- VariableFeaturePlot(seurat_norm)
+var_plot <- LabelPoints(plot = var_plot, points = top10_var, repel = TRUE, 
+                        xnudge = 0, ynudge = 0, size = 4, color = "black") + 
+  theme_classic() +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),
+    legend.background = element_rect(fill = "white")
+  ) +
+  ggtitle("Top 10 Variable Features") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(file.path(plotDir, "variable_features_clean.png"),
+       var_plot, width = 10, height = 6, dpi = 300, bg = "white")
+
+cat("✓ Saved variable features plot\n")
+```
+
+## STEP 4: Scale Data
+
+```{r scale_data}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("SCALING DATA\n")
+cat(rep("=", 60), "\n", sep = "")
+
+seurat_norm <- ScaleData(
+  seurat_norm,
+  features = rownames(seurat_norm),
+  verbose = FALSE
+)
+
+cat("✓ Scaling complete\n")
+cat("What happens: For each gene:\n")
+cat("1. Center: Subtract mean expression (mean = 0)\n")
+cat("2. Scale: Divide by standard deviation (SD = 1)\n")
+cat("Result: Z-scores for each gene across all cells\n")
+```
+
+## STEP 5: Run PCA
+
+```{r run_pca}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("RUNNING PCA\n")
+cat(rep("=", 60), "\n", sep = "")
+
+seurat_norm <- RunPCA(
+  seurat_norm,
+  features = VariableFeatures(object = seurat_norm),
+  npcs = 100,
+  verbose = FALSE
+)
+
+cat("✓ PCA complete (100 principal components)\n")
+cat("PCA reduces 2500 variable genes → 100 dimensions\n")
+```
+
+## STEP 6: Visualize PCA
+
+```{r visualize_pca}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("VISUALIZING PCA RESULTS\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# PCA plots
+p1 <- DimPlot(seurat_norm, reduction = "pca", group.by = "Condition") +
+  ggtitle("PCA - By Condition")
+
+p2 <- DimPlot(seurat_norm, reduction = "pca", group.by = "orig.ident") +
+  ggtitle("PCA - By Sample") +
+  NoLegend()
+
+# Visualize loadings
+p3 <- VizDimLoadings(seurat_norm, dims = 1:4, reduction = "pca") +
+  theme(axis.text = element_text(size = 6))
+
+# Heatmap of top genes in first 9 PCs
+p4 <- DimHeatmap(seurat_norm, dims = 1:9, cells = 500, balanced = TRUE)
+
+# Save all PCA plots
+pca_plots <- (p1 | p2) / p3 / p4
+ggsave(file.path(plotDir, "pca_visualization.png"),
+       pca_plots, width = 14, height = 16, dpi = 300)
+
+cat("✓ Saved PCA visualization plots\n")
+```
+
+## STEP 7: Create Elbow Plot for PC Selection
+
+```{r elbow_plot}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("CREATING ELBOW PLOT\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Calculate variance explained
+stdev <- seurat_norm[["pca"]]@stdev
+var_explained <- stdev^2 / sum(stdev^2)
+cum_var <- cumsum(var_explained)
+
+# Create variance table
+pca_var_df <- data.frame(
+  PC = 1:length(stdev),
+  Variance = var_explained,
+  CumulativeVariance = cum_var
+)
+
+# Find PCs for variance thresholds
+num_PCs_95 <- min(which(cum_var >= 0.95))
+num_PCs_90 <- min(which(cum_var >= 0.90))
+num_PCs_85 <- min(which(cum_var >= 0.85))
+
+cat("\nVariance explained:\n")
+cat("PCs explaining 85% variance:", num_PCs_85, "\n")
+cat("PCs explaining 90% variance:", num_PCs_90, "\n")
+cat("PCs explaining 95% variance:", num_PCs_95, "\n")
+
+# Create elbow plot with white background
+elbow_plot <- ElbowPlot(seurat_norm, ndims = 50, reduction = 'pca') +
+  theme_classic() +
+  theme(
+    plot.background = element_rect(fill = "white", color = "white"),
+    panel.background = element_rect(fill = "white"),
+    legend.background = element_rect(fill = "white"),
+    legend.key = element_rect(fill = "white"),
+    axis.line = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    plot.title = element_text(color = "black", hjust = 0.5, face = "bold")
+  ) +
+  labs(title = "PCA Elbow Plot") +
+  geom_vline(xintercept = num_PCs_90, linetype = "dashed", color = "blue", linewidth = 0.8) +
+  geom_vline(xintercept = num_PCs_95, linetype = "dashed", color = "red", linewidth = 0.8) +
+  annotate("text", x = num_PCs_90 + 2, y = max(stdev[1:50]), 
+           label = paste("90% (PC", num_PCs_90, ")"), 
+           color = "blue", size = 3.5, fontface = "bold") +
+  annotate("text", x = num_PCs_95 + 2, y = max(stdev[1:50]) * 0.9, 
+           label = paste("95% (PC", num_PCs_95, ")"), 
+           color = "red", size = 3.5, fontface = "bold")
+
+ggsave(file.path(plotDir, "elbow_plot_clean.png"),
+       elbow_plot, width = 10, height = 7, dpi = 300, bg = "white")
+
+# Save variance table
+write.csv(pca_var_df, file.path(outputDir, "pca_variance.csv"), row.names = FALSE)
+
+cat("✓ Saved elbow plot and variance table\n")
+```
+
+## STEP 8: Run UMAP and Clustering (Pre-Harmony)
+
+```{r umap_clustering}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("RUNNING UMAP AND CLUSTERING (PRE-HARMONY)\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Calculate total variance explained by top 35 PCs
+pca_stdev <- seurat_norm[["pca"]]@stdev
+pca_var_explained <- (pca_stdev^2) / sum(pca_stdev^2) * 100
+total_var <- sum(pca_var_explained[1:35])
+cat("Total variance explained by top 35 PCs:", round(total_var, 2), "%\n")
+
+# Run UMAP
+seurat_norm <- RunUMAP(seurat_norm, dims = 1:35)
+
+# Find neighbors and clusters
+seurat_norm <- FindNeighbors(seurat_norm, dims = 1:35, reduction = "pca", graph.name = "pca_nn")
+seurat_norm <- FindClusters(seurat_norm, resolution = 0.8, graph.name = "pca_nn", cluster.name = "pca_clusters")
+
+n_clusters <- length(unique(seurat_norm$pca_clusters))
+cat("✓ Clustering complete. Number of clusters:", n_clusters, "\n")
+```
+
+## STEP 9: Visualize Unintegrated Results
+
+```{r visualize_unintegrated}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("VISUALIZING UNINTEGRATED RESULTS\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Create UMAP plots
+p1 <- DimPlot(seurat_norm, 
+              reduction = "umap", 
+              group.by = "pca_clusters",
+              label = TRUE,
+              repel = TRUE) +
+  ggtitle(paste("Unintegrated -", n_clusters, "Clusters"))
+
+p2 <- DimPlot(seurat_norm,
+              reduction = "umap",
+              group.by = "Condition") +
+  ggtitle("Unintegrated - By Condition")
+
+p3 <- DimPlot(seurat_norm,
+              reduction = "umap",
+              group.by = "orig.ident") +
+  ggtitle("Unintegrated - By Sample") +
+  NoLegend()
+
+# Combine and save
+combined_umap <- (p1 | p2) / p3
+ggsave(file.path(plotDir, "umap_unintegrated.png"),
+       combined_umap, width = 14, height = 10, dpi = 300)
+
+cat("✓ Saved UMAP plots\n")
+```
+
+## STEP 10: Save Normalized Object
+
+```{r save_normalized}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("SAVING NORMALIZED OBJECT\n")
+cat(rep("=", 60), "\n", sep = "")
+
+saveRDS(seurat_norm, file.path(outputDir, "seurat_normalized.rds"))
+saveRDS(seurat_norm, file.path(outputDir, "03_GSE279086_seurat_pca_umap.rds"))
+
+cat("✓ Saved normalized object\n")
+
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("🎉 NORMALIZATION & PCA COMPLETE! 🎉\n")
+cat(rep("=", 60), "\n", sep = "")
+
+cat("\n=== WHAT WE DID ===\n")
+cat("1. ✓ Normalized counts (LogNormalize, scale factor 10,000)\n")
+cat("2. ✓ Found 2500 most variable genes\n")
+cat("3. ✓ Scaled data (mean = 0, SD = 1 for each gene)\n")
+cat("4. ✓ Ran PCA (100 principal components)\n")
+cat("5. ✓ Ran UMAP and clustering\n")
+cat("6. ✓ Visualized results\n")
+
+cat("\n=== KEY STATISTICS ===\n")
+cat("Variable features:", length(VariableFeatures(seurat_norm)), "\n")
+cat("Recommended PCs for 90% variance:", num_PCs_90, "\n")
+cat("Recommended PCs for 95% variance:", num_PCs_95, "\n")
+cat("Number of clusters (pre-Harmony):", n_clusters, "\n")
+```
+
+---
+
+**Next Script:** 04_Harmony_Integration.Rmd

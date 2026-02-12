@@ -1,0 +1,214 @@
+---
+title: "GSE279086 Single-Cell Analysis - Part 1: Data Preparation & QC"
+author: "Smriti Arora"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# SCRIPT 01: DATA LOADING AND INITIAL PREPARATION
+
+```{r setup}
+# Load required packages
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+```
+
+## STEP 1: Load Raw 10X Data and Create Individual Seurat Objects
+
+```{r load_10x_data}
+data_dir <- "C:/ardij/Documents/GSE279086/raw_geo_data"
+
+# List all GSM subdirectories
+samples <- list.dirs(data_dir, recursive = FALSE)
+
+seurat_list <- lapply(samples, function(sample_path) {
+  sample_name <- basename(sample_path)
+  message("Processing: ", sample_name)
+  
+  # Load data
+  counts <- Read10X(data.dir = sample_path)
+  
+  # Create Seurat object
+  seurat_obj <- CreateSeuratObject(
+    counts = counts, 
+    project = sample_name,
+    min.cells = 3,
+    min.features = 200, 
+    assay = "RNA"
+  )
+  
+  # Add metadata
+  seurat_obj$sample <- sample_name
+
+  # Calculate QC metrics
+  seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
+  seurat_obj[["percent.rb"]] <- PercentageFeatureSet(seurat_obj, pattern = "^RP[SL]|RPLP")
+  
+  # Handle any missing values (just in case)
+  seurat_obj@meta.data <- seurat_obj@meta.data %>%
+    mutate(
+      percent.mt = replace_na(percent.mt, 0),
+      percent.rb = replace_na(percent.rb, 0)
+    )
+  
+  message(paste0("NaNs remaining in 'percent.mt': ", sum(is.nan(seurat_obj$percent.mt))))
+  message(paste0("NaNs remaining in 'percent.rb': ", sum(is.nan(seurat_obj$percent.rb))))
+  
+  return(seurat_obj)
+})
+
+names(seurat_list) <- basename(samples)
+names(seurat_list)
+```
+
+## STEP 2: Save Individual Objects
+
+```{r save_individual}
+output_dir <- file.path("~/GSE279086/input")
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Save each Seurat object
+for (i in seq_along(seurat_list)) {
+  sample_name <- seurat_list[[i]]@project.name
+  save_path <- file.path(output_dir, paste0(sample_name, "_seurat.rds"))
+  
+  message("Saving: ", sample_name, " -> ", save_path)
+  saveRDS(seurat_list[[i]], file = save_path)
+}
+
+message("All Seurat objects saved successfully in: ", output_dir)
+```
+
+## STEP 3: Setup Directories
+
+```{r setup_directories}
+# Set directories
+inputDir <- "~/GSE279086/input/"
+outputDir <- "~/GSE279086/output/"
+plotDir <- "~/GSE279086/plots/"
+
+# Create directories if needed
+dir.create(outputDir, recursive = TRUE, showWarnings = FALSE)
+dir.create(plotDir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Directories set up!\n")
+cat("Input:", inputDir, "\n")
+cat("Output:", outputDir, "\n")
+cat("Plots:", plotDir, "\n")
+```
+
+## STEP 4: Load All Individual RDS Files
+
+```{r load_all_rds}
+# List all RDS files
+rds_files <- list.files(inputDir, pattern = "_seurat\\.rds$", full.names = TRUE)
+cat("Found", length(rds_files), "RDS files\n")
+
+# Load all files
+seurat_list <- lapply(rds_files, readRDS)
+
+# Name them by GSM ID (from filename)
+names(seurat_list) <- gsub("_seurat\\.rds$", "", basename(rds_files))
+
+# Print sample names
+cat("\nSample names (GSM IDs):\n")
+print(names(seurat_list))
+```
+
+## STEP 5: Create Sample Summary
+
+```{r sample_summary}
+# Create summary table
+sample_summary <- data.frame(
+  Sample = names(seurat_list),
+  Cells = sapply(seurat_list, ncol),
+  Genes = sapply(seurat_list, nrow),
+  Mean_Genes = sapply(seurat_list, function(x) mean(x$nFeature_RNA)),
+  Mean_UMIs = sapply(seurat_list, function(x) mean(x$nCount_RNA)),
+  Mean_MT = sapply(seurat_list, function(x) mean(x$percent.mt))
+)
+
+print(sample_summary)
+
+# Save summary
+write.csv(sample_summary, 
+          file = paste0(outputDir, "01_sample_summary.csv"),
+          row.names = FALSE)
+
+# Visualize sample sizes
+p1 <- ggplot(sample_summary, aes(x = reorder(Sample, Cells), y = Cells)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Number of Cells per Sample", x = "Sample", y = "Cell Count") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 6))
+
+ggsave(paste0(plotDir, "01_cells_per_sample.png"), p1, width = 10, height = 8)
+```
+
+## STEP 6: Merge All Samples
+
+```{r merge_samples}
+# Add sample names as orig.ident to each object
+for(i in seq_along(seurat_list)) {
+  seurat_list[[i]]$orig.ident <- names(seurat_list)[i]
+  seurat_list[[i]]$Sample <- names(seurat_list)[i]
+}
+
+# Merge all objects
+seurat_combined <- merge(seurat_list[[1]], y = seurat_list[-1])
+
+cat("\n=== MERGED OBJECT SUMMARY ===\n")
+cat("Dimensions (genes x cells):", dim(seurat_combined), "\n")
+cat("Total cells:", ncol(seurat_combined), "\n")
+cat("Total genes:", nrow(seurat_combined), "\n")
+cat("Unique samples:", length(unique(seurat_combined$orig.ident)), "\n")
+
+# Save merged object
+saveRDS(seurat_combined, file = paste0(outputDir, "02_seurat_merged.rds"))
+cat("\nSaved merged object to:", paste0(outputDir, "02_seurat_merged.rds"), "\n")
+```
+
+## STEP 7: Add Condition Metadata (HC vs T1D)
+
+```{r add_conditions}
+# Load GEO metadata mapping
+mapping <- read.csv("C:/Users/ardij/Documents/GSE279086/output/GSE279086_metadata_parsed.csv")
+
+# Load merged object
+seurat_merged <- readRDS(paste0(outputDir, "02_seurat_merged.rds"))
+
+# Create condition mapping
+condition_map <- setNames(mapping$Condition, mapping$GSM_ID)
+
+# Add condition using AddMetaData
+cat("Adding conditions...\n")
+condition_vector <- condition_map[seurat_merged$orig.ident]
+names(condition_vector) <- colnames(seurat_merged)
+
+seurat_merged <- AddMetaData(
+  object = seurat_merged,
+  metadata = condition_vector,
+  col.name = "Condition"
+)
+
+# Verify
+cat("\n✓ Condition added successfully!\n")
+cat("\nCondition distribution:\n")
+print(table(seurat_merged$Condition, useNA = "ifany"))
+
+# Save
+saveRDS(seurat_merged, paste0(outputDir, "seurat_with_conditions.rds"))
+cat("\n✓ Saved object with conditions\n")
+```
+
+---
+
+**Next Script:** 02_QC_and_Filtering.Rmd

@@ -1,0 +1,346 @@
+---
+title: "GSE279086 Single-Cell Analysis - Part 2: Quality Control & Filtering"
+author: "Smriti Arora"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# SCRIPT 02: QUALITY CONTROL AND FILTERING
+
+```{r setup}
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+# Set directories
+outputDir <- "~/GSE279086/output/"
+plotDir <- "~/GSE279086/plots/"
+```
+
+## STEP 1: Load Merged Object with Conditions
+
+```{r load_data}
+seurat_merged <- readRDS(paste0(outputDir, "seurat_with_conditions.rds"))
+
+cat("Loaded object:\n")
+cat("Cells:", ncol(seurat_merged), "\n")
+cat("Genes:", nrow(seurat_merged), "\n")
+cat("Conditions:", paste(names(table(seurat_merged$Condition)), collapse = ", "), "\n")
+```
+
+## STEP 2: Calculate QC Metrics
+
+```{r calculate_qc}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("CALCULATING QC METRICS\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Calculate mitochondrial percentage
+seurat_merged[["percent.mt"]] <- PercentageFeatureSet(
+  seurat_merged,
+  pattern = "^MT-"
+)
+
+# Calculate ribosomal percentage  
+seurat_merged[["percent.rb"]] <- PercentageFeatureSet(
+  seurat_merged,
+  pattern = "^RP[SL]|^RPL|^RPS"
+)
+
+cat("✓ QC metrics calculated\n")
+cat("\nSummary of QC metrics:\n")
+cat("nFeature_RNA (genes per cell):\n")
+print(summary(seurat_merged$nFeature_RNA))
+
+cat("\npercent.mt (mitochondrial %):\n")
+print(summary(seurat_merged$percent.mt))
+
+cat("\npercent.rb (ribosomal %):\n")
+print(summary(seurat_merged$percent.rb))
+```
+
+## STEP 3: Visualize QC Metrics (Before Filtering)
+
+```{r visualize_before_qc}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("VISUALIZE QC METRICS (BEFORE FILTERING)\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# 1. Violin plots by condition
+p1 <- VlnPlot(seurat_merged,
+              features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+              pt.size = 0.1,
+              ncol = 3,
+              group.by = "Condition") +
+  ggtitle("QC Metrics by Condition (Before Filtering)")
+
+# 2. Scatter plots
+qc_data <- seurat_merged@meta.data
+
+p2 <- ggplot(qc_data, aes(x = nCount_RNA, y = nFeature_RNA, color = percent.mt)) +
+  geom_point(alpha = 0.3, size = 0.5) +
+  scale_color_gradient2(low = "blue", mid = "yellow", high = "red", midpoint = 10) +
+  labs(x = "UMI Count", y = "Gene Count", title = "Genes vs UMIs (colored by MT%)") +
+  theme_minimal()
+
+p3 <- ggplot(qc_data, aes(x = nCount_RNA, y = percent.mt)) +
+  geom_point(alpha = 0.3, size = 0.5, color = "darkblue") +
+  labs(x = "UMI Count", y = "Mitochondrial %", title = "UMIs vs Mitochondrial %") +
+  theme_minimal()
+
+# 3. Distribution histograms
+p4 <- ggplot(qc_data, aes(x = nFeature_RNA)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  labs(x = "Genes per Cell", y = "Count", title = "Distribution of Genes per Cell") +
+  theme_minimal()
+
+p5 <- ggplot(qc_data, aes(x = percent.mt)) +
+  geom_histogram(bins = 50, fill = "firebrick", alpha = 0.7) +
+  labs(x = "Mitochondrial %", y = "Count", title = "Distribution of Mitochondrial %") +
+  theme_minimal()
+
+# Save all plots
+combined_plots <- (p1) / (p2 | p3) / (p4 | p5)
+ggsave(file.path(plotDir, "qc_before_filtering.png"),
+       combined_plots, width = 14, height = 16, dpi = 300)
+
+cat("✓ QC plots saved\n")
+```
+
+## STEP 4: Define Filtering Functions
+
+```{r filtering_functions}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("DEFINING FILTERING FUNCTIONS\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Function 1: Remove outliers using Mahalanobis distance
+fil_nCounts <- function(seurat_obj, threshold_mahalanobis){
+  ncounts_data <- as.data.frame(seurat_obj@meta.data$nCount_RNA)
+  colnames(ncounts_data) <- "nCount_RNA"
+  
+  mahalanobis_dist <- mahalanobis(
+    x = ncounts_data,
+    center = colMeans(ncounts_data),
+    cov = cov(ncounts_data)
+  )
+  
+  seurat_obj$mahal_dist_nCount <- mahalanobis_dist
+  mahal.fil <- qchisq(threshold_mahalanobis, df = ncol(ncounts_data))
+  message(paste0("Mahalanobis threshold: ", round(mahal.fil, 3)))
+  
+  cells_to_remove <- rownames(seurat_obj@meta.data)[seurat_obj$mahal_dist_nCount > mahal.fil]
+  message(paste0("Removing ", length(cells_to_remove), " cells (outliers by nCount_RNA)"))
+  
+  return(subset(seurat_obj, cells = setdiff(colnames(seurat_obj), cells_to_remove)))
+}
+
+# Function 2: Filter by gene count
+filter_nFeatures <- function(seurat_obj, min_feat, max_feat, ...) {
+  return(subset(seurat_obj, subset = nFeature_RNA > min_feat & nFeature_RNA < max_feat))
+}
+
+# Function 3: Filter by mitochondrial percentage
+filter_mt <- function(seurat_obj, max_mt) {
+  return(subset(seurat_obj, subset = percent.mt < max_mt))
+}
+
+# Function 4: Filter by ribosomal percentage
+filter_rb <- function(seurat_obj, max_rb) {
+  return(subset(seurat_obj, subset = percent.rb < max_rb))
+}
+
+cat("✓ Filtering functions defined\n")
+```
+
+## STEP 5: Set Filtering Parameters
+
+```{r set_parameters}
+study_id <- "GSE279086"
+
+# Filtering thresholds
+min_features    <- 500
+max_features    <- 6000
+max_percent_mt  <- 20
+max_percent_rb  <- 25
+threshold_mahalanobis <- 0.95
+
+cat("\n=== FILTERING PARAMETERS ===\n")
+cat("Study ID:", study_id, "\n")
+cat("Minimum features:", min_features, "\n")
+cat("Maximum features:", max_features, "\n")
+cat("Maximum mitochondrial %:", max_percent_mt, "\n")
+cat("Maximum ribosomal %:", max_percent_rb, "\n")
+cat("Mahalanobis threshold:", threshold_mahalanobis, "\n")
+```
+
+## STEP 6: Apply Filters
+
+```{r apply_filters}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("APPLYING FILTERS\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Record before stats
+cells_before <- ncol(seurat_merged)
+samples_before <- length(unique(seurat_merged$orig.ident))
+
+cat("BEFORE FILTERING:\n")
+cat("- Total cells:", format(cells_before, big.mark = ","), "\n")
+cat("- Samples:", samples_before, "\n")
+
+# Apply filters in sequence
+cat("\n1. Filtering by gene count (nFeature_RNA)...\n")
+seurat_filtered <- filter_nFeatures(seurat_merged, min_features, max_features)
+cat("   After nFeature filter:", format(ncol(seurat_filtered), big.mark = ","), "cells\n")
+
+cat("\n2. Filtering by mitochondrial percentage...\n")
+seurat_filtered <- filter_mt(seurat_filtered, max_percent_mt)
+cat("   After MT% filter:", format(ncol(seurat_filtered), big.mark = ","), "cells\n")
+
+cat("\n3. Removing outliers using Mahalanobis distance...\n")
+seurat_filtered <- fil_nCounts(seurat_filtered, threshold_mahalanobis)
+cat("   After Mahalanobis filter:", format(ncol(seurat_filtered), big.mark = ","), "cells\n")
+
+cat("\n4. Filtering by ribosomal percentage...\n")
+seurat_filtered <- filter_rb(seurat_filtered, max_percent_rb)
+cat("   After RB% filter:", format(ncol(seurat_filtered), big.mark = ","), "cells\n")
+
+# Final stats
+cells_after <- ncol(seurat_filtered)
+samples_after <- length(unique(seurat_filtered$orig.ident))
+
+cat("\n", rep("-", 40), "\n", sep = "")
+cat("FILTERING SUMMARY:\n")
+cat(rep("-", 40), "\n", sep = "")
+cat("Before filtering:  ", format(cells_before, big.mark = ","), "cells\n")
+cat("After filtering:   ", format(cells_after, big.mark = ","), "cells\n")
+cat("Percentage kept:   ", round(cells_after/cells_before * 100, 1), "%\n")
+cat("Samples remaining: ", samples_after, "of", samples_before, "\n")
+
+# Check condition distribution
+cat("\nCondition distribution after filtering:\n")
+print(table(seurat_filtered$Condition))
+```
+
+## STEP 7: Create QC Metrics Table
+
+```{r qc_metrics_table}
+# Cell counts before QC
+df_pre_qc <- as.data.frame(table(seurat_merged$orig.ident))
+colnames(df_pre_qc) <- c("Sample_ID", "Cells_Before_QC")
+
+# Cell counts after QC
+df_post_qc <- as.data.frame(table(seurat_filtered$orig.ident))
+colnames(df_post_qc) <- c("Sample_ID", "Cells_After_QC")
+
+# Merge into final QC table
+final_qc_table <- merge(df_pre_qc, df_post_qc, by = "Sample_ID", all.x = TRUE)
+final_qc_table$Cells_After_QC[is.na(final_qc_table$Cells_After_QC)] <- 0
+final_qc_table$Percentage_Kept <- round(
+  final_qc_table$Cells_After_QC / final_qc_table$Cells_Before_QC * 100, 1
+)
+
+cat("\n=== SAMPLE-LEVEL QC METRICS ===\n")
+print(head(final_qc_table, 10))
+
+# Save QC table
+write.csv(final_qc_table, file.path(outputDir, paste0(study_id, "_QC_metrics.csv")), 
+          row.names = FALSE)
+cat("\n✓ Saved QC metrics table\n")
+```
+
+## STEP 8: Visualize After Filtering
+
+```{r visualize_after_qc}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("VISUALIZING AFTER FILTERING\n")
+cat(rep("=", 60), "\n", sep = "")
+
+qc_data_filtered <- seurat_filtered@meta.data
+
+# Violin plots after filtering
+p1_after <- VlnPlot(seurat_filtered,
+                   features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+                   pt.size = 0.1,
+                   ncol = 3,
+                   group.by = "Condition") +
+  ggtitle("QC Metrics by Condition (After Filtering)")
+
+# Scatter plot after filtering
+p2_after <- ggplot(qc_data_filtered, aes(x = nCount_RNA, y = nFeature_RNA, color = percent.mt)) +
+  geom_point(alpha = 0.3, size = 0.5) +
+  scale_color_gradient2(low = "blue", mid = "yellow", high = "red", midpoint = 5) +
+  labs(x = "UMI Count", y = "Gene Count", title = "After Filtering: Genes vs UMIs") +
+  theme_minimal()
+
+# Distribution after filtering
+p3_after <- ggplot(qc_data_filtered, aes(x = nFeature_RNA)) +
+  geom_histogram(bins = 50, fill = "darkgreen", alpha = 0.7) +
+  labs(x = "Genes per Cell", y = "Count", title = "Genes per Cell (After Filtering)") +
+  theme_minimal()
+
+p4_after <- ggplot(qc_data_filtered, aes(x = percent.mt)) +
+  geom_histogram(bins = 50, fill = "darkred", alpha = 0.7) +
+  labs(x = "Mitochondrial %", y = "Count", title = "Mitochondrial % (After Filtering)") +
+  theme_minimal()
+
+# Save plots
+combined_after <- (p1_after) / (p2_after) / (p3_after | p4_after)
+ggsave(file.path(plotDir, "qc_after_filtering.png"),
+       combined_after, width = 14, height = 14, dpi = 300)
+
+cat("✓ Post-filtering plots saved\n")
+```
+
+## STEP 9: Save Filtered Object
+
+```{r save_filtered}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("SAVING RESULTS\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Save filtered object
+saveRDS(seurat_filtered, file.path(outputDir, "seurat_filtered.rds"))
+cat("✓ Saved filtered object\n")
+
+# Create and save summary table
+summary_table <- data.frame(
+  Metric = c("Total Cells", "Samples", "Mean Genes/Cell", "Mean MT%", "Mean RB%"),
+  Before = c(cells_before,
+             samples_before,
+             round(mean(seurat_merged$nFeature_RNA), 1),
+             round(mean(seurat_merged$percent.mt), 2),
+             round(mean(seurat_merged$percent.rb), 2)),
+  After = c(cells_after,
+            samples_after,
+            round(mean(seurat_filtered$nFeature_RNA), 1),
+            round(mean(seurat_filtered$percent.mt), 2),
+            round(mean(seurat_filtered$percent.rb), 2))
+)
+
+write.csv(summary_table, file.path(outputDir, "qc_filtering_summary.csv"),
+          row.names = FALSE)
+
+# Save QC parameters
+params <- data.frame(
+  Parameter = c("min_features", "max_features", "max_mt", "max_rb"),
+  Value = c(min_features, max_features, max_percent_mt, max_percent_rb),
+  Description = c(
+    "Minimum genes per cell (remove empty droplets)",
+    "Maximum genes per cell (remove doublets)",
+    "Maximum mitochondrial % (remove dying cells)",
+    "Maximum ribosomal % (remove stressed cells)"
+  )
+)
+
+write.csv(params, file.path(outputDir, "qc_parameters.csv"), row.names = FALSE)
+
+cat("✓ All QC results saved\n")
+cat("\n🎉 QC & FILTERING COMPLETE!\n")
+```
+
+---
+
+**Next Script:** 03_Normalization_PCA.Rmd

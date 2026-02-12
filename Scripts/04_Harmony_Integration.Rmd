@@ -1,0 +1,278 @@
+---
+title: "GSE279086 Single-Cell Analysis - Part 4: Harmony Integration"
+author: "Smriti Arora"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# SCRIPT 04: HARMONY INTEGRATION AND FINAL PROCESSING
+
+```{r setup}
+library(Seurat)
+library(harmony)
+library(ggplot2)
+library(patchwork)
+library(SingleCellExperiment)
+library(zellkonverter)
+library(FNN)
+
+# Set directories
+outputDir <- "~/GSE279086/output/"
+plotDir <- "~/GSE279086/plots/"
+```
+
+## STEP 1: Load Pre-Harmony Object and Join Layers
+
+```{r load_and_join}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("LOADING PRE-HARMONY OBJECT\n")
+cat(rep("=", 60), "\n", sep = "")
+
+seurat_processed <- readRDS(file.path(outputDir, "03_GSE279086_seurat_pca_umap.rds"))
+
+cat("Loaded object:\n")
+print(seurat_processed)
+cat("\nLayers present:", Layers(seurat_processed), "\n")
+
+# Join layers if needed
+if(length(Layers(seurat_processed)) > 3) {
+  cat("\nJoining layers...\n")
+  seurat_processed <- JoinLayers(seurat_processed)
+  cat("After joining - Layers:", Layers(seurat_processed), "\n")
+  
+  # Save joined version
+  saveRDS(seurat_processed, 
+          file.path(outputDir, "03_GSE279086_seurat_pca_umap_JOINED.rds"))
+  cat("✓ Saved joined version\n")
+}
+```
+
+## STEP 2: Run Harmony Integration
+
+```{r run_harmony}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("RUNNING HARMONY INTEGRATION\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Run Harmony batch correction
+harmony_processed <- RunHarmony(
+  seurat_processed,
+  group.by.vars = "orig.ident",  # Batch correct by sample
+  plot_convergence = TRUE,
+  reduction = "pca",
+  dims.use = 1:50,
+  max.iter.harmony = 20,
+  verbose = TRUE
+)
+
+cat("✓ Harmony integration complete\n")
+```
+
+## STEP 3: Run UMAP on Harmony-Corrected Data
+
+```{r harmony_umap}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("RUNNING UMAP ON HARMONY REDUCTION\n")
+cat(rep("=", 60), "\n", sep = "")
+
+harmony_processed <- RunUMAP(
+  harmony_processed, 
+  reduction = "harmony", 
+  dims = 1:50,
+  reduction.name = "umap",
+  reduction.key = "UMAP_"
+)
+
+cat("✓ UMAP complete\n")
+```
+
+## STEP 4: Clustering on Harmony-Integrated Data
+
+```{r harmony_clustering}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("CLUSTERING ON HARMONY DATA\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Find neighbors
+harmony_processed <- FindNeighbors(
+  harmony_processed, 
+  reduction = "harmony", 
+  dims = 1:50
+)
+
+# Find clusters
+harmony_processed <- FindClusters(
+  harmony_processed, 
+  resolution = 0.8
+)
+
+# Rename to Harmony_clusters
+harmony_processed$Harmony_clusters <- harmony_processed$seurat_clusters
+
+cat("✓ Clustering complete\n")
+cat("Number of Harmony clusters:", length(unique(harmony_processed$Harmony_clusters)), "\n")
+```
+
+## STEP 5: Save Harmony-Integrated Object
+
+```{r save_harmony}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("SAVING HARMONY-INTEGRATED OBJECT\n")
+cat(rep("=", 60), "\n", sep = "")
+
+saveRDS(harmony_processed, file.path(outputDir, "04_GSE279086_harmony_corrected.rds"))
+cat("✓ Saved: 04_GSE279086_harmony_corrected.rds\n")
+```
+
+## STEP 6: Visualize Before vs. After Harmony
+
+```{r visualize_harmony}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("VISUALIZING HARMONY INTEGRATION RESULTS\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Before Harmony - By Sample
+p1 <- DimPlot(seurat_processed, reduction = "umap", group.by = "orig.ident") + 
+  ggtitle("Before Harmony - By Sample") + 
+  NoLegend()
+
+# After Harmony - By Sample
+p2 <- DimPlot(harmony_processed, reduction = "umap", group.by = "orig.ident") + 
+  ggtitle("After Harmony - By Sample") + 
+  NoLegend()
+
+# Before Harmony - By Condition
+p3 <- DimPlot(seurat_processed, reduction = "umap", group.by = "Condition") +
+  ggtitle("Before Harmony - By Condition")
+
+# After Harmony - By Condition
+p4 <- DimPlot(harmony_processed, reduction = "umap", group.by = "Condition") +
+  ggtitle("After Harmony - By Condition")
+
+# Save individual plots
+ggsave(file.path(plotDir, "GSE279086_Uncorrected_sample.png"), 
+       p1, width = 7, height = 6, dpi = 600)
+ggsave(file.path(plotDir, "GSE279086_Uncorrected_condition.png"), 
+       p2, width = 8, height = 6, dpi = 600)
+ggsave(file.path(plotDir, "GSE279086_Harmony_sample.png"), 
+       p3, width = 7, height = 6, dpi = 600)
+ggsave(file.path(plotDir, "GSE279086_Harmony_condition.png"), 
+       p4, width = 8, height = 6, dpi = 600)
+
+# Combined comparison plot
+combined <- (p1 | p2) / (p3 | p4)
+ggsave(file.path(plotDir, "harmony_comparison.png"),
+       combined, width = 14, height = 12, dpi = 300)
+
+cat("✓ Saved comparison plots\n")
+```
+
+## STEP 7: Batch Mixing Analysis
+
+```{r batch_mixing}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("ANALYZING BATCH MIXING\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Function to compute batch mixing
+compute_knn_batch_mixing <- function(seu, batch_var, reduction = "pca", dims = 1:50, k = 20){
+  emb <- Embeddings(seu, reduction = reduction)[, dims, drop = FALSE]
+  nn <- FNN::get.knn(emb, k = k)$nn.index
+  labs <- seu@meta.data[[batch_var]]
+  same <- sapply(seq_len(nrow(nn)), function(i) mean(labs[nn[i,]] == labs[i], na.rm = TRUE))
+  df <- data.frame(batch = labs, frac_same_batch = same)
+  aggregate(frac_same_batch ~ batch, df, mean)
+}
+
+batch_column <- "orig.ident"
+
+mix_df <- compute_knn_batch_mixing(seurat_processed, batch_column, "pca", 1:50, 20)
+mix_df_harmony <- compute_knn_batch_mixing(harmony_processed, batch_column, "harmony", 1:50, 20)
+
+mix_df_combined <- rbind(
+  transform(mix_df, Status = "Before"),
+  transform(mix_df_harmony, Status = "Harmony")
+)
+
+batch_cor_plot <- ggplot(mix_df_combined, aes(x = batch, y = frac_same_batch, fill = Status)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  labs(title = "Batch Mixing - GSE279086", x = "Samples", y = "Mean same-batch fraction") +
+  scale_fill_manual(values = c("Before" = "#00CED1", "Harmony" = "#9370DB")) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.title = element_blank())
+
+ggsave(file.path(plotDir, "GSE279086_batch_mixing_barplot.png"), 
+       batch_cor_plot, width = 18, height = 8, dpi = 300)
+
+cat("✓ Saved batch mixing plot\n")
+```
+
+## STEP 8: Export to h5ad for CellTypist
+
+```{r export_h5ad}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("EXPORTING TO H5AD FOR CELLTYPIST\n")
+cat(rep("=", 60), "\n", sep = "")
+
+# Join layers
+cat("Joining layers...\n")
+harmony_joined <- JoinLayers(harmony_processed)
+
+# Remove scale.data to prevent memory issues
+cat("Removing scale.data layer to prevent memory issues...\n")
+harmony_joined[["RNA"]]@layers$scale.data <- NULL
+cat("Remaining layers:", paste(Layers(harmony_joined), collapse = ", "), "\n")
+
+# Convert to SingleCellExperiment
+cat("Converting to SingleCellExperiment...\n")
+sce_harmony <- as.SingleCellExperiment(harmony_joined, assay = "RNA")
+
+# Write to h5ad with compression
+cat("Writing h5ad file (this may take a few minutes)...\n")
+writeH5AD(sce_harmony, 
+          file = file.path(outputDir, "04_GSE279086_harmony_corrected.h5ad"),
+          compression = "gzip")
+
+# Display file size
+h5ad_size <- file.size(file.path(outputDir, "04_GSE279086_harmony_corrected.h5ad")) / 1024^2
+cat("✓ Saved: 04_GSE279086_harmony_corrected.h5ad\n")
+cat("H5AD file size:", round(h5ad_size, 2), "MB\n")
+```
+
+## STEP 9: Export UMAP Coordinates
+
+```{r export_umap}
+# Export UMAP coordinates for downstream use
+umap_coords <- Embeddings(harmony_processed, "umap")
+write.csv(umap_coords, file.path(plotDir, "GSE279086_umap_coordinates.csv"))
+cat("✓ Saved UMAP coordinates\n")
+```
+
+## STEP 10: Final Summary
+
+```{r final_summary}
+cat("\n", rep("=", 60), "\n", sep = "")
+cat("✓ HARMONY INTEGRATION COMPLETE!\n")
+cat(rep("=", 60), "\n", sep = "")
+
+cat("\nFiles created:\n")
+cat("1. 04_GSE279086_harmony_corrected.rds (for R)\n")
+cat("2. 04_GSE279086_harmony_corrected.h5ad (for CellTypist/Python)\n")
+cat("3. Harmony comparison plots\n")
+cat("4. Batch mixing analysis plot\n")
+cat("5. UMAP coordinates\n")
+
+cat("\n=== FINAL OBJECT SUMMARY ===\n")
+cat("Cells:", ncol(harmony_processed), "\n")
+cat("Genes:", nrow(harmony_processed), "\n")
+cat("Samples:", length(unique(harmony_processed$orig.ident)), "\n")
+cat("Conditions: HC (", sum(harmony_processed$Condition == "HC"), 
+    ") + T1D (", sum(harmony_processed$Condition == "T1D"), ")\n", sep = "")
+cat("Harmony clusters:", length(unique(harmony_processed$Harmony_clusters)), "\n")
+
+cat("\n🎉 Ready for CellTypist annotation!\n")
+```
+
+---
+
+**Next Step:** Run CellTypist annotation in Python using the h5ad file
