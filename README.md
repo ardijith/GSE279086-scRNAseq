@@ -31,56 +31,37 @@ This repository contains a  single-cell RNA-seq analysis pipeline for investigat
 ## 📁 Repository Structure
 
 ```
-GSE279086-T1D-scRNAseq/
+GSE279086-T1D-Kidney-scRNAseq/
 │
-├── README.md                          # This file
+├── README.md                          # You are here
 ├── LICENSE                            # MIT License
+├── .gitignore                         # Files not uploaded to GitHub
 │
-├── scripts/                           # Analysis scripts
-│   ├── 01_data_preparation.Rmd        # 10X to Seurat conversion, QC
-│   ├── 02_integration_harmony.Rmd     # Harmony integration & clustering
-│   └── 03_celltypist_annotation.ipynb # Cell type annotation in Python
+├── scripts/                           # 📜 ALL ANALYSIS CODE
+│   ├── 01_download_and_prepare.Rmd    # Download 10X data, create Seurat objects
+│   ├── 02_qc_filtering.Rmd            # QC metrics, filtering, visualization
+│   ├── 03_integration_clustering.Rmd  # Normalization, PCA, Harmony, UMAP
+│   ├── 04_export_h5ad.Rmd            # Export files for CellTypist
+│   ├── 05_celltypist_annotation.ipynb # PYTHON - Cell type annotation
+│   └── 06_differential_expression.Rmd # T1D vs HC analysis, TCA cycle genes
 │
-├── data/                              # Data files (gitignored)
-│   ├── raw/                           # Raw 10X data (not tracked)
-│   └── metadata/                      # Sample metadata
-│       └── GSE279086_metadata.csv
+├── data/                              # 💾 Small metadata files (UPLOAD)
+│   └── metadata/                     
+│       ├── GSE279086_metadata_full.csv    # Complete GEO metadata
+│       └── GSE279086_metadata_parsed.csv  # GSM_ID → Condition (12 HC, 28 T1D)
 │
-├── outputs/                           # Analysis outputs
-│   ├── rds/                           # Seurat objects
-│   │   ├── 02_seurat_merged.rds
-│   │   ├── 03_seurat_pca_umap_JOINED.rds
-│   │   └── 04_harmony_integrated.rds
-│   │
-│   ├── h5ad/                          # Python-compatible files
-│   │   └── 04_harmony_integrated.h5ad
-│   │
-│   └── tables/                        # Summary tables
-│       ├── 01_sample_summary.csv
-│       ├── qc_metrics.csv
-│       └── pca_variance.csv
+├── outputs/                           # 📊 Processed results (SELECTIVE UPLOAD)
+│   ├── tables/                       # ✅ UPLOAD - Summary statistics
+│   ├── h5ad/                         # ✅ UPLOAD - Python-compatible files
+│   └── rds/                          # ❌ NOT UPLOADED - Too large (>10 GB)
 │
-├── plots/                             # Figures and visualizations
-│   ├── qc/                            # Quality control plots
-│   │   ├── cells_per_sample.png
-│   │   └── qc_violin_plots.png
-│   │
-│   ├── integration/                   # Harmony integration results
-│   │   ├── elbow_plot.png
-│   │   └── harmony_comparison.png
-│   │
-│   └── annotation/                    # Cell type annotation
-│       └── celltypist_umap.png
-│
-├── environment/                       # Reproducibility files
-│   ├── R_sessionInfo.txt
-│   ├── requirements.txt               # Python packages
-│   └── conda_environment.yml
-│
-└── docs/                              # Documentation
-    ├── methods.md                     # Detailed methods
-    └── file_descriptions.md           # File descriptions
-```
+├── plots/                            # 🎨 All figures (UPLOAD)
+    ├── qc/                          # Quality control plots
+    ├── integration/                 # Harmony before/after
+    ├── annotation/                  # Cell type UMAPs
+    └── differential_expression/     # TCA cycle, volcano plots
+
+
 
 ---
 
@@ -106,10 +87,7 @@ BiocManager::install("zellkonverter")
 
 ### Python Environment
 
-```bash
-# Create conda environment
-conda create -n scrna python=3.8
-conda activate scrna
+In google colab
 
 # Install packages
 pip install scanpy
@@ -185,6 +163,16 @@ This notebook:
 
 ## 📈 Workflow Overview
 
+
+RAW DATA → QC → MERGE → HARMONY → UMAP → CELLTYPIST → T1D vs HC
+ 40 samples    ✓     ✓        ✓        ✓        ✓           ✓
+               │      │        │        │        │           │
+               ▼      ▼        ▼        ▼        ▼           ▼
+            Remove   Add     Remove   See     Identify   Find TCA
+            bad     condi-   batch    biol-   kidney     cycle
+            cells   tions    effects  ogy     cell       genes
+                                       types
+
 ```mermaid
 graph TD
     A[Raw 10X Data<br/>40 samples] --> B[Quality Control<br/>Filter cells & genes]
@@ -231,7 +219,9 @@ graph TD
 - **Tool:** CellTypist
 - **Model:** Immune_All_Low.pkl
 - **Majority voting:** Enabled
-
+ 
+### DEG & Pathway Analysis
+- 
 ---
 
 ## 📂 Important Files to Keep
@@ -263,51 +253,23 @@ graph TD
 
 ---
 
-## 🗑️ Files to Delete
-
-### Temporary/Intermediate Files
-- ❌ `GSE279086_merged.rds` (101.9 MB) - Old version with layer issues
-- ❌ `GSE279086_seurat_processed.rds` (5 GB) - Duplicate of another version
-- ❌ `.Rhistory` - R command history
-- ❌ Any `.h5seurat` files - Not needed if you have RDS + h5ad
-- ❌ `seurat_filtered.rds` (103 MB) - Intermediate QC file
-- ❌ `seurat_normalized.rds` (5 GB) - Intermediate normalization file
-- ❌ `seurat_with_conditions.rds` (424.8 MB) - Duplicate metadata version
-
-### Summary Files to Keep
-- ✅ `01_sample_summary.csv`
-- ✅ `pca_variance.csv`
-- ✅ `qc_filtering_summary.csv`
-- ✅ `GSE279086_QC_metrics.csv`
-
----
 
 ## 🔬 Citation
 
 If you use this analysis pipeline, please cite:
 
 ```
-[Your Name]. (2026). Single-Cell RNA-seq Analysis of Type 1 Diabetes 
-Pancreatic Islets (GSE279086). GitHub repository: 
-https://github.com/[your-username]/GSE279086-T1D-scRNAseq
+Dijith A R. (2026). Single-Cell RNA-seq Analysis of Type 1 Diabetes Kidney Biopsies (GSE279086). GitHub repository: 
+https://github.com/ardijith/GSE279086-scRNAseq
 ```
 
 **Original Dataset:**
 ```
-[Original Authors]. (Year). [Original Paper Title]. 
+Choi YJ, Richard G, Zhang G, et al. (2024). Attenuated kidney oxidative 
+metabolism in young adults with type 1 diabetes. J Clin Invest. 
+134(24):e183984. https://doi.org/10.1172/JCI183984
 GEO Accession: GSE279086
 ```
-
----
-
-## 📧 Contact
-
-- **Author:** [Your Name]
-- **Email:** [your.email@example.com]
-- **LinkedIn:** [Your LinkedIn]
-- **Portfolio:** [Your Portfolio Website]
-
----
 
 ## 📄 License
 
