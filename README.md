@@ -1,4 +1,4 @@
-# Single-Cell RNA-seq Analysis of Type 1 Diabetes Pancreatic Islets
+# Single-Cell RNA-seq Analysis of Type 1 Diabetes Kidney Biopsies (GSE279086)
 
 [![DOI](https://img.shields.io/badge/GEO-GSE279086-blue)](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE279086)
 [![R](https://img.shields.io/badge/R-4.0%2B-blue)](https://www.r-project.org/)
@@ -7,7 +7,7 @@
 
 ## 📋 Overview
 
-This repository contains a comprehensive single-cell RNA-seq analysis pipeline for investigating pancreatic islet cells in Type 1 Diabetes (T1D) patients compared to healthy controls. The analysis includes data preprocessing, quality control, batch correction using Harmony, clustering, and cell type annotation using CellTypist.
+This repository contains a  single-cell RNA-seq analysis pipeline for investigating kidney biopsies from Type 1 Diabetes (T1D) patients compared to Healthy Controls (HC). This analysis directly follows the methodology from Choi et al. (2024) "Attenuated kidney oxidative metabolism in young adults with type 1 diabetes" published in JCI.The analysis includes data preprocessing, quality control, batch correction using Harmony, clustering, and cell type annotation using CellTypist.
 
 **Dataset:** GSE279086  
 **Technology:** 10X Genomics scRNA-seq  
