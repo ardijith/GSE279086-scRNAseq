@@ -40,19 +40,19 @@ GSE279086-T1D-Kidney-scRNAseq/
 ├── scripts/                           # 📜 ALL ANALYSIS CODE
 │   ├── 01_download_and_prepare.Rmd    # Download 10X data, create Seurat objects
 │   ├── 02_qc_filtering.Rmd            # QC metrics, filtering, visualization
-│   ├── 03_integration_clustering.Rmd  # Normalization, PCA, Harmony, UMAP
-│   ├── 04_export_h5ad.Rmd            # Export files for CellTypist
+│   ├── 03_Normalization.Rmd           # Normalization, PCA
+│   ├── 04_Harmony Integration.Rmd     #Harmony,UMAP,Export files for CellTypist
 │   ├── 05_celltypist_annotation.ipynb # PYTHON - Cell type annotation
-│   └── 06_differential_expression.Rmd # T1D vs HC analysis, TCA cycle genes
+│   └── 06_DEG and Pathways.Rmd        # T1D vs HC analysis, TCA cycle genes
 │
-├── data/                              # 💾 Small metadata files (UPLOAD)
+├── data/                              # 💾 Small metadata files (UPLOADED)
 │   └── metadata/                     
 │       ├── GSE279086_metadata_full.csv    # Complete GEO metadata
 │       └── GSE279086_metadata_parsed.csv  # GSM_ID → Condition (12 HC, 28 T1D)
 │
 ├── outputs/                           # 📊 Processed results (SELECTIVE UPLOAD)
 │   ├── tables/                       # ✅ UPLOAD - Summary statistics
-│   ├── h5ad/                         # ✅ UPLOAD - Python-compatible files
+│   ├── h5ad/                         # ❌ Not Uploaded - Python-compatible files
 │   └── rds/                          # ❌ NOT UPLOADED - Too large (>10 GB)
 │
 ├── plots/                            # 🎨 All figures (UPLOAD)
