@@ -87,7 +87,7 @@ BiocManager::install("zellkonverter")
 
 ### Python Environment
 
-In google colab
+In google colab or wherever you prefer
 
 # Install packages
 pip install scanpy
@@ -157,21 +157,40 @@ This notebook:
 ### Clustering
 - **Pre-integration:** 33 clusters (PCA-based)
 - **Post-Harmony:** Batch effects reduced
-- **Cell types identified:** [To be added after CellTypist annotation]
+- **Cell types identified:** SLC12A1, UMOD (C-TAL), CRYAB, TPM1 (DTL)
 
 ---
 
 ## 📈 Workflow Overview
 
 
-RAW DATA → QC → MERGE → HARMONY → UMAP → CELLTYPIST → T1D vs HC
- 40 samples    ✓     ✓        ✓        ✓        ✓           ✓
-               │      │        │        │        │           │
-               ▼      ▼        ▼        ▼        ▼           ▼
-            Remove   Add     Remove   See     Identify   Find TCA
-            bad     condi-   batch    biol-   kidney     cycle
-            cells   tions    effects  ogy     cell       genes
-                                       types
+RAW DATA (40 samples)
+    ↓
+📥 01_download_and_prepare.Rmd
+    ↓
+🔧 Seurat objects + QC metrics
+    ↓
+🧹 02_qc_filtering.Rmd
+    ↓
+✨ Clean data (24,813 cells)
+    ↓
+⚖️ 03_integration_clustering.Rmd
+    ↓
+📊 Normalization → PCA → HARMONY → UMAP
+    ↓
+🔄 04_export_h5ad.Rmd
+    ↓
+🐍 05_celltypist_annotation.ipynb
+    ↓
+🏷️ Cell type labels (PT, DTL, C-TAL, PC...)
+    ↓
+⚔️ 06_differential_expression.Rmd
+    ↓
+📉 T1D vs HC comparison
+    ↓
+🧬 Pathway enrichment (Reactome)
+   
+
 
 ```mermaid
 graph TD
@@ -221,8 +240,15 @@ graph TD
 - **Majority voting:** Enabled
  
 ### DEG & Pathway Analysis
-- 
----
+- **Tool:** Mast
+- **Model:** MAST hurdle model
+- **Thresholds:** |log2FC| > 0.25 (biological significance)
+
+                   p_val_adj < 0.05 (statistical significance)
+
+                   min.pct = 0.1 (expressed in ≥10% of cells)
+
+ ---
 
 ## 📂 Important Files to Keep
 
